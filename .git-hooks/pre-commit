@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Prevent direct commits to main
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" = "main" ]; then
+    echo "Direct commits to main not allowed. Use a feature branch."
+    exit 1
+fi
+
+# Run cargo fmt check
+if ! cargo fmt --check 2>/dev/null; then
+    echo "Code is not formatted. Run: cargo fmt"
+    exit 1
+fi
+
+# Run clippy
+if ! cargo clippy -- -D warnings 2>/dev/null; then
+    echo "Clippy found issues. Fix them before committing."
+    exit 1
+fi
