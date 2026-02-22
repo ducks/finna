@@ -288,28 +288,115 @@ async fn cmd_implement(step_filter: Option<String>) -> Result<()> {
 
     println!("finna implement: {} step(s)", steps.len());
 
-    for step in steps {
-        let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
-        if !Path::new(&spec_path).exists() {
-            eprintln!("  Skipping {}: no spec found", step.name);
-            continue;
-        }
-
-        let spec = fs::read_to_string(&spec_path)?;
-
-        println!("\n  Implementing: {}", step.name);
-        let impl_prompt = IMPLEMENT_PROMPT.replace("{spec}", &spec);
-        let impl_proposals = query_parallel(&impl_prompt).await?;
-
-        let synth_prompt =
-            SYNTH_IMPL_PROMPT.replace("{proposals}", &impl_proposals.join("\n\n---\n\n"));
-        let impl_result = query_claude(&synth_prompt).await?;
-
-        let output: ImplOutput = parse_json(&impl_result)?;
-        apply_edits(&output.edits)?;
+    // If single step, run sequentially (original behavior)
+    if steps.len() == 1 {
+        let step = steps[0];
+        implement_step(step).await?;
+        println!("\nDone!");
+        return Ok(());
     }
 
+    // Multiple steps: implement in parallel respecting dependencies
+    implement_parallel(&steps).await?;
+
     println!("\nDone!");
+    Ok(())
+}
+
+async fn implement_step(step: &Step) -> Result<()> {
+    let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
+    implement_step_by_path(&step.name, &spec_path).await
+}
+
+async fn implement_step_by_path(step_name: &str, spec_path: &str) -> Result<()> {
+    if !Path::new(spec_path).exists() {
+        eprintln!("  Skipping {}: no spec found", step_name);
+        return Ok(());
+    }
+
+    let spec = fs::read_to_string(spec_path)?;
+
+    println!("\n  Implementing: {}", step_name);
+    let impl_prompt = IMPLEMENT_PROMPT.replace("{spec}", &spec);
+    let impl_proposals = query_parallel(&impl_prompt).await?;
+
+    let synth_prompt =
+        SYNTH_IMPL_PROMPT.replace("{proposals}", &impl_proposals.join("\n\n---\n\n"));
+    let impl_result = query_claude(&synth_prompt).await?;
+
+    let output: ImplOutput = parse_json(&impl_result)?;
+    apply_edits(&output.edits)?;
+
+    Ok(())
+}
+
+async fn implement_parallel(steps: &[&Step]) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    // Track completed steps
+    let completed = Arc::new(Mutex::new(HashSet::new()));
+
+    // Build map of step name -> step for quick lookup (for future use)
+    let _step_map: HashMap<String, &Step> = steps.iter().map(|s| (s.name.clone(), *s)).collect();
+
+    // Keep implementing until all steps are done
+    while completed.lock().await.len() < steps.len() {
+        // Find steps ready to implement (all dependencies completed)
+        let ready_steps: Vec<&Step> = {
+            let comp = completed.lock().await;
+            steps
+                .iter()
+                .filter(|s| !comp.contains(&s.name))
+                .filter(|s| s.depends_on.iter().all(|dep| comp.contains(dep)))
+                .copied()
+                .collect()
+        };
+
+        if ready_steps.is_empty() {
+            // Check for circular dependencies or missing dependencies
+            let remaining: Vec<String> = {
+                let comp = completed.lock().await;
+                steps
+                    .iter()
+                    .filter(|s| !comp.contains(&s.name))
+                    .map(|s| s.name.clone())
+                    .collect()
+            };
+            anyhow::bail!("No steps ready to implement. Remaining: {:?}. Possible circular dependency or missing step.", remaining);
+        }
+
+        println!("\n  Running {} step(s) in parallel...", ready_steps.len());
+
+        // Launch all ready steps in parallel
+        let mut handles = vec![];
+        for step in ready_steps {
+            let step_name = step.name.clone();
+            let step_order = step.order;
+            let completed_clone = Arc::clone(&completed);
+
+            let handle = tokio::spawn(async move {
+                // Reconstruct step from stored data
+                let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step_order, step_name);
+                let result = implement_step_by_path(&step_name, &spec_path).await;
+                if result.is_ok() {
+                    completed_clone.lock().await.insert(step_name.clone());
+                    println!("  ✓ Completed: {}", step_name);
+                } else {
+                    eprintln!("  ✗ Failed: {}", step_name);
+                }
+                result
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all parallel steps to complete
+        for handle in handles {
+            handle.await??;
+        }
+    }
+
     Ok(())
 }
 
