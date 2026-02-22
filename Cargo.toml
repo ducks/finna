@@ -1,6 +1,6 @@
 [package]
 name = "finna"
-version = "20260210.0.0"
+version = "20260222.0.0"
 edition = "2021"
 
 [dependencies]
