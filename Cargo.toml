@@ -2,6 +2,11 @@
 name = "finna"
 version = "20260222.0.0"
 edition = "2021"
+description = "Multi-model debate, spec, and implement tool for AI-assisted development"
+license = "MIT"
+repository = "https://github.com/ducks/finna"
+keywords = ["ai", "llm", "development", "multi-model", "code-generation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
