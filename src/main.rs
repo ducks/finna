@@ -146,6 +146,7 @@ struct Step {
     name: String,
     summary: String,
     #[serde(default)]
+    #[allow(dead_code)]
     depends_on: Vec<String>,
 }
 
