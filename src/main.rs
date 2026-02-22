@@ -85,19 +85,25 @@ Implement this spec.
 {spec}
 
 ## How
-Generate exact code edits.
+Generate exact code edits AND shell commands to run.
 
 ## Output (JSON only, no markdown)
-{{"edits": [{{"path": "file.rs", "old": "exact text to find", "new": "replacement text"}}]}}"#;
+{{
+  "edits": [{{"path": "file.rs", "old": "exact text to find", "new": "replacement text"}}],
+  "commands": [{{"command": "rails new app", "description": "Create Rails app", "working_dir": null}}]
+}}"#;
 
 const SYNTH_IMPL_PROMPT: &str = r#"## What
-Synthesize implementation proposals into final edits.
+Synthesize implementation proposals into final edits and commands.
 
 ## Proposals
 {proposals}
 
 ## Output (JSON only, no markdown)
-{{"edits": [{{"path": "file", "old": "exact", "new": "replacement"}}]}}"#;
+{{
+  "edits": [{{"path": "file", "old": "exact", "new": "replacement"}}],
+  "commands": [{{"command": "bundle install", "description": "Install gems", "working_dir": null}}]
+}}"#;
 
 #[derive(Parser)]
 #[command(name = "finna")]
@@ -152,7 +158,10 @@ struct Step {
 
 #[derive(Debug, serde::Deserialize)]
 struct ImplOutput {
+    #[serde(default)]
     edits: Vec<Edit>,
+    #[serde(default)]
+    commands: Vec<ShellCommand>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -160,6 +169,14 @@ struct Edit {
     path: String,
     old: String,
     new: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ShellCommand {
+    command: String,
+    description: String,
+    #[serde(default)]
+    working_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -326,6 +343,7 @@ async fn implement_step_by_path(step_name: &str, spec_path: &str) -> Result<()> 
 
     let output: ImplOutput = parse_json(&impl_result)?;
     apply_edits(&output.edits)?;
+    execute_commands(&output.commands).await?;
 
     Ok(())
 }
@@ -463,6 +481,7 @@ async fn cmd_all(idea: &str) -> Result<()> {
 
         let output: ImplOutput = parse_json(&impl_result)?;
         apply_edits(&output.edits)?;
+        execute_commands(&output.commands).await?;
     }
 
     println!("\nDone!");
@@ -725,4 +744,34 @@ More text
         let result = extract_toml(text);
         assert_eq!(result, text);
     }
+}
+
+async fn execute_commands(commands: &[ShellCommand]) -> Result<()> {
+    use std::process::Stdio;
+
+    for cmd in commands {
+        println!("  Running: {}", cmd.description);
+        println!("    $ {}", cmd.command);
+
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(&cmd.command);
+
+        if let Some(ref dir) = cmd.working_dir {
+            command.current_dir(dir);
+        }
+
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+
+        let status = command
+            .status()
+            .await
+            .with_context(|| format!("Failed to execute: {}", cmd.command))?;
+
+        if !status.success() {
+            anyhow::bail!("Command failed: {}", cmd.command);
+        }
+    }
+
+    Ok(())
 }
