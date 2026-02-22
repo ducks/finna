@@ -1,6 +1,6 @@
 [package]
 name = "finna"
-version = "20260222.0.0"
+version = "20260222.0.1"
 edition = "2021"
 description = "Multi-model debate, spec, and implement tool for AI-assisted development"
 license = "MIT"
