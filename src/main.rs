@@ -629,3 +629,100 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}...", &s[..max])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_step_deserialization() {
+        let toml = r#"
+            order = 1
+            name = "test-step"
+            summary = "Test step"
+            depends_on = ["other-step"]
+        "#;
+
+        let step: Step = toml::from_str(toml).unwrap();
+        assert_eq!(step.order, 1);
+        assert_eq!(step.name, "test-step");
+        assert_eq!(step.summary, "Test step");
+        assert_eq!(step.depends_on, vec!["other-step"]);
+    }
+
+    #[test]
+    fn test_step_deserialization_no_deps() {
+        let toml = r#"
+            order = 1
+            name = "test-step"
+            summary = "Test step"
+        "#;
+
+        let step: Step = toml::from_str(toml).unwrap();
+        assert_eq!(step.depends_on.len(), 0);
+    }
+
+    #[test]
+    fn test_roadmap_deserialization() {
+        let toml = r#"
+            what = "Test project"
+            why = "Testing"
+            
+            [[steps]]
+            order = 1
+            name = "step-one"
+            summary = "First step"
+            depends_on = []
+            
+            [[steps]]
+            order = 2
+            name = "step-two"
+            summary = "Second step"
+            depends_on = ["step-one"]
+        "#;
+
+        let roadmap: Roadmap = toml::from_str(toml).unwrap();
+        assert_eq!(roadmap.what, "Test project");
+        assert_eq!(roadmap.why, "Testing");
+        assert_eq!(roadmap.steps.len(), 2);
+        assert_eq!(roadmap.steps[0].name, "step-one");
+        assert_eq!(roadmap.steps[1].depends_on, vec!["step-one"]);
+    }
+
+    #[test]
+    fn test_extract_toml_with_fence() {
+        let text = r#"
+Some explanation text
+
+```toml
+key = "value"
+```
+
+More text
+        "#;
+
+        let result = extract_toml(text);
+        assert_eq!(result.trim(), "key = \"value\"");
+    }
+
+    #[test]
+    fn test_extract_toml_without_fence() {
+        let text = r#"
+Some text
+```
+key = "value"
+```
+More text
+        "#;
+
+        let result = extract_toml(text);
+        assert_eq!(result.trim(), "key = \"value\"");
+    }
+
+    #[test]
+    fn test_extract_toml_plain() {
+        let text = "key = \"value\"";
+        let result = extract_toml(text);
+        assert_eq!(result, text);
+    }
+}
