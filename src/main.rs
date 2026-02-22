@@ -87,9 +87,15 @@ Implement this spec.
 ## How
 Generate exact code edits AND shell commands to run.
 
+For NEW files: set "old" to empty string ""
+For EXISTING files: provide exact text to find and replace
+
 ## Output (JSON only, no markdown)
 {{
-  "edits": [{{"path": "file.rs", "old": "exact text to find", "new": "replacement text"}}],
+  "edits": [
+    {{"path": "new_file.rs", "old": "", "new": "full file content"}},
+    {{"path": "existing.rs", "old": "exact text to find", "new": "replacement text"}}
+  ],
   "commands": [{{"command": "rails new app", "description": "Create Rails app", "working_dir": null}}]
 }}"#;
 
@@ -99,9 +105,16 @@ Synthesize implementation proposals into final edits and commands.
 ## Proposals
 {proposals}
 
+## How
+For NEW files: set "old" to empty string ""
+For EXISTING files: provide exact text to find and replace
+
 ## Output (JSON only, no markdown)
 {{
-  "edits": [{{"path": "file", "old": "exact", "new": "replacement"}}],
+  "edits": [
+    {{"path": "new_file", "old": "", "new": "full content"}},
+    {{"path": "existing", "old": "exact", "new": "replacement"}}
+  ],
   "commands": [{{"command": "bundle install", "description": "Install gems", "working_dir": null}}]
 }}"#;
 
