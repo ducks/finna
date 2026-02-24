@@ -622,7 +622,19 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T> {
         text
     };
 
-    serde_json::from_str(json_str.trim()).context("Failed to parse JSON")
+    serde_json::from_str(json_str.trim()).map_err(|e| {
+        eprintln!("\n=== JSON Parse Error ===");
+        eprintln!("Error: {}", e);
+        eprintln!("\n=== Raw Response (first 1000 chars) ===");
+        eprintln!("{}", &text.chars().take(1000).collect::<String>());
+        eprintln!("\n=== Extracted JSON (first 1000 chars) ===");
+        eprintln!(
+            "{}",
+            &json_str.trim().chars().take(1000).collect::<String>()
+        );
+        eprintln!("========================\n");
+        anyhow::anyhow!("Failed to parse JSON: {}", e)
+    })
 }
 
 fn apply_edits(edits: &[Edit]) -> Result<()> {
