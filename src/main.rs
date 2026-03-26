@@ -362,6 +362,60 @@ fn mark_step_completed(spec_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn git_ensure_main_and_pull() -> Result<()> {
+    // Check current branch
+    let output = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()?;
+    let current_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Switch to main if not already there
+    if current_branch != "main" {
+        println!("    (switching from {} to main)", current_branch);
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .status()?;
+    }
+
+    // Pull latest
+    println!("    (pulling latest from main)");
+    std::process::Command::new("git")
+        .args(["pull"])
+        .status()?;
+
+    Ok(())
+}
+
+fn git_create_feature_branch(step_name: &str) -> Result<String> {
+    let branch_name = format!("feature/step-{}", step_name);
+    println!("    (creating branch: {})", branch_name);
+    std::process::Command::new("git")
+        .args(["checkout", "-b", &branch_name])
+        .status()?;
+    Ok(branch_name)
+}
+
+fn git_merge_to_main(branch_name: &str, step_name: &str) -> Result<()> {
+    // Switch back to main
+    println!("    (merging {} to main)", branch_name);
+    std::process::Command::new("git")
+        .args(["checkout", "main"])
+        .status()?;
+
+    // Merge with --no-ff to create merge commit
+    let merge_msg = format!("Merge branch '{}' - implemented {}", branch_name, step_name);
+    std::process::Command::new("git")
+        .args(["merge", "--no-ff", "-m", &merge_msg, &branch_name])
+        .status()?;
+
+    // Delete the feature branch
+    std::process::Command::new("git")
+        .args(["branch", "-d", &branch_name])
+        .status()?;
+
+    Ok(())
+}
+
 async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &str, force: bool) -> Result<()> {
     if !Path::new(spec_path).exists() {
         eprintln!("  Skipping {}: no spec found", step_name);
@@ -373,6 +427,12 @@ async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &st
         println!("  ⊙ Skipping {}: already completed (use --force to re-run)", step_name);
         return Ok(());
     }
+
+    // Git workflow: ensure on main and pull
+    git_ensure_main_and_pull()?;
+
+    // Create feature branch for this step
+    let branch_name = git_create_feature_branch(step_name)?;
 
     let spec = fs::read_to_string(spec_path)?;
 
@@ -410,6 +470,9 @@ async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &st
 
     // Mark as completed
     mark_step_completed(spec_path)?;
+
+    // Git workflow: merge back to main
+    git_merge_to_main(&branch_name, step_name)?;
 
     Ok(())
 }
