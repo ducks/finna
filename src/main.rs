@@ -1,5 +1,8 @@
+mod config;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use config::Config;
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
@@ -149,6 +152,9 @@ enum Commands {
         /// Specific step to implement (default: all)
         #[arg(short, long)]
         step: Option<String>,
+        /// Force re-implementation of completed steps
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -195,6 +201,7 @@ struct ShellCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config = Config::load()?;
 
     match cli.command {
         Some(Commands::Debate { idea }) => {
@@ -202,10 +209,10 @@ async fn main() -> Result<()> {
             if idea.is_empty() {
                 anyhow::bail!("Usage: finna debate <idea>");
             }
-            cmd_debate(&idea).await
+            cmd_debate(&config, &idea).await
         }
-        Some(Commands::Spec { step }) => cmd_spec(step).await,
-        Some(Commands::Implement { step }) => cmd_implement(step).await,
+        Some(Commands::Spec { step }) => cmd_spec(&config, step).await,
+        Some(Commands::Implement { step, force }) => cmd_implement(&config, step, force).await,
         None => {
             let idea = cli.idea.join(" ");
             if idea.is_empty() {
@@ -215,26 +222,26 @@ async fn main() -> Result<()> {
                 eprintln!("       finna implement [--step NAME]");
                 std::process::exit(1);
             }
-            cmd_all(&idea).await
+            cmd_all(&config, &idea).await
         }
     }
 }
 
-async fn cmd_debate(idea: &str) -> Result<()> {
+async fn cmd_debate(config: &Config, idea: &str) -> Result<()> {
     println!("finna debate: {}", idea);
 
     println!("\n[1/3] Debating...");
     let debate_prompt = DEBATE_PROMPT.replace("{idea}", idea);
-    let proposals = query_parallel(&debate_prompt).await?;
+    let proposals = query_parallel(config, &config.default_debate_providers, &debate_prompt).await?;
 
     println!("\n[2/3] Reaching consensus...");
     let consensus_prompt = CONSENSUS_PROMPT.replace("{proposals}", &proposals.join("\n\n---\n\n"));
-    let consensus = query_claude(&consensus_prompt).await?;
+    let consensus = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &consensus_prompt).await?;
     println!("Consensus: {}", truncate(&consensus, 200));
 
     println!("\n[3/3] Creating roadmap...");
     let roadmap_prompt = ROADMAP_PROMPT.replace("{consensus}", &consensus);
-    let roadmap_toml = query_claude(&roadmap_prompt).await?;
+    let roadmap_toml = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &roadmap_prompt).await?;
     let roadmap_toml = extract_toml(&roadmap_toml);
 
     fs::create_dir_all(".finna/specs")?;
@@ -254,7 +261,7 @@ async fn cmd_debate(idea: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_spec(step_filter: Option<String>) -> Result<()> {
+async fn cmd_spec(config: &Config, step_filter: Option<String>) -> Result<()> {
     let roadmap_path = ".finna/roadmap.arf";
     if !Path::new(roadmap_path).exists() {
         anyhow::bail!("No roadmap found. Run 'finna debate <idea>' first.");
@@ -285,7 +292,7 @@ async fn cmd_spec(step_filter: Option<String>) -> Result<()> {
             .replace("{order}", &step.order.to_string());
 
         println!("\n  Spec: {}", step.name);
-        let spec_toml = query_claude(&spec_prompt).await?;
+        let spec_toml = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &spec_prompt).await?;
         let spec_toml = extract_toml(&spec_toml);
 
         let spec_dir = format!(".finna/specs/{:02}-{}", step.order, step.name);
@@ -298,7 +305,7 @@ async fn cmd_spec(step_filter: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_implement(step_filter: Option<String>) -> Result<()> {
+async fn cmd_implement(config: &Config, step_filter: Option<String>, force: bool) -> Result<()> {
     let roadmap_path = ".finna/roadmap.arf";
     if !Path::new(roadmap_path).exists() {
         anyhow::bail!("No roadmap found. Run 'finna debate <idea>' first.");
@@ -321,26 +328,49 @@ async fn cmd_implement(step_filter: Option<String>) -> Result<()> {
     // If single step, run sequentially (original behavior)
     if steps.len() == 1 {
         let step = steps[0];
-        implement_step(step).await?;
+        implement_step(config, step, force).await?;
         println!("\nDone!");
         return Ok(());
     }
 
     // Multiple steps: implement in parallel respecting dependencies
-    implement_parallel(&steps).await?;
+    implement_parallel(config, &steps, force).await?;
 
     println!("\nDone!");
     Ok(())
 }
 
-async fn implement_step(step: &Step) -> Result<()> {
+async fn implement_step(config: &Config, step: &Step, force: bool) -> Result<()> {
     let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
-    implement_step_by_path(&step.name, &spec_path).await
+    implement_step_by_path(config, &step.name, &spec_path, force).await
 }
 
-async fn implement_step_by_path(step_name: &str, spec_path: &str) -> Result<()> {
+fn is_step_completed(spec_path: &str) -> bool {
+    if let Ok(contents) = fs::read_to_string(spec_path) {
+        contents.contains("outcome = \"success\"")
+    } else {
+        false
+    }
+}
+
+fn mark_step_completed(spec_path: &str) -> Result<()> {
+    let mut contents = fs::read_to_string(spec_path)?;
+    if !contents.contains("outcome =") {
+        contents.push_str("\noutcome = \"success\"\n");
+        fs::write(spec_path, contents)?;
+    }
+    Ok(())
+}
+
+async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &str, force: bool) -> Result<()> {
     if !Path::new(spec_path).exists() {
         eprintln!("  Skipping {}: no spec found", step_name);
+        return Ok(());
+    }
+
+    // Check if already completed
+    if !force && is_step_completed(spec_path) {
+        println!("  ⊙ Skipping {}: already completed (use --force to re-run)", step_name);
         return Ok(());
     }
 
@@ -348,20 +378,23 @@ async fn implement_step_by_path(step_name: &str, spec_path: &str) -> Result<()> 
 
     println!("\n  Implementing: {}", step_name);
     let impl_prompt = IMPLEMENT_PROMPT.replace("{spec}", &spec);
-    let impl_proposals = query_parallel(&impl_prompt).await?;
+    let impl_proposals = query_parallel(config, &config.default_debate_providers, &impl_prompt).await?;
 
     let synth_prompt =
         SYNTH_IMPL_PROMPT.replace("{proposals}", &impl_proposals.join("\n\n---\n\n"));
-    let impl_result = query_claude(&synth_prompt).await?;
+    let impl_result = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &synth_prompt).await?;
 
     let output: ImplOutput = parse_json(&impl_result)?;
     apply_edits(&output.edits)?;
     execute_commands(&output.commands).await?;
 
+    // Mark as completed
+    mark_step_completed(spec_path)?;
+
     Ok(())
 }
 
-async fn implement_parallel(steps: &[&Step]) -> Result<()> {
+async fn implement_parallel(config: &Config, steps: &[&Step], force: bool) -> Result<()> {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -369,8 +402,22 @@ async fn implement_parallel(steps: &[&Step]) -> Result<()> {
     // Track completed steps
     let completed = Arc::new(Mutex::new(HashSet::new()));
 
+    // Pre-populate with already-completed steps (if not forcing re-run)
+    if !force {
+        for step in steps {
+            let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
+            if is_step_completed(&spec_path) {
+                completed.lock().await.insert(step.name.clone());
+            }
+        }
+    }
+
     // Build map of step name -> step for quick lookup (for future use)
     let _step_map: HashMap<String, &Step> = steps.iter().map(|s| (s.name.clone(), *s)).collect();
+
+    // Clone config for use in spawned tasks
+    let config = Arc::new(config.clone());
+    let force = Arc::new(force);
 
     // Keep implementing until all steps are done
     while completed.lock().await.len() < steps.len() {
@@ -406,11 +453,13 @@ async fn implement_parallel(steps: &[&Step]) -> Result<()> {
             let step_name = step.name.clone();
             let step_order = step.order;
             let completed_clone = Arc::clone(&completed);
+            let config_clone = Arc::clone(&config);
+            let force_clone = Arc::clone(&force);
 
             let handle = tokio::spawn(async move {
                 // Reconstruct step from stored data
                 let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step_order, step_name);
-                let result = implement_step_by_path(&step_name, &spec_path).await;
+                let result = implement_step_by_path(&config_clone, &step_name, &spec_path, *force_clone).await;
                 if result.is_ok() {
                     completed_clone.lock().await.insert(step_name.clone());
                     println!("  ✓ Completed: {}", step_name);
@@ -431,23 +480,23 @@ async fn implement_parallel(steps: &[&Step]) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_all(idea: &str) -> Result<()> {
+async fn cmd_all(config: &Config, idea: &str) -> Result<()> {
     println!("finna: {}", idea);
 
     // Stage 1: Debate
     println!("\n[1/5] Debating...");
     let debate_prompt = DEBATE_PROMPT.replace("{idea}", idea);
-    let proposals = query_parallel(&debate_prompt).await?;
+    let proposals = query_parallel(config, &config.default_debate_providers, &debate_prompt).await?;
 
     println!("\n[2/5] Reaching consensus...");
     let consensus_prompt = CONSENSUS_PROMPT.replace("{proposals}", &proposals.join("\n\n---\n\n"));
-    let consensus = query_claude(&consensus_prompt).await?;
+    let consensus = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &consensus_prompt).await?;
     println!("Consensus: {}", truncate(&consensus, 200));
 
     // Stage 2: Roadmap
     println!("\n[3/5] Creating roadmap...");
     let roadmap_prompt = ROADMAP_PROMPT.replace("{consensus}", &consensus);
-    let roadmap_toml = query_claude(&roadmap_prompt).await?;
+    let roadmap_toml = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &roadmap_prompt).await?;
     let roadmap_toml = extract_toml(&roadmap_toml);
 
     fs::create_dir_all(".finna/specs")?;
@@ -469,7 +518,7 @@ async fn cmd_all(idea: &str) -> Result<()> {
             .replace("{context}", &step_context)
             .replace("{order}", &step.order.to_string());
 
-        let spec_toml = query_claude(&spec_prompt).await?;
+        let spec_toml = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &spec_prompt).await?;
         let spec_toml = extract_toml(&spec_toml);
 
         let spec_dir = format!(".finna/specs/{:02}-{}", step.order, step.name);
@@ -486,11 +535,11 @@ async fn cmd_all(idea: &str) -> Result<()> {
 
         println!("  Implementing: {}", step.name);
         let impl_prompt = IMPLEMENT_PROMPT.replace("{spec}", &spec);
-        let impl_proposals = query_parallel(&impl_prompt).await?;
+        let impl_proposals = query_parallel(config, &config.default_debate_providers, &impl_prompt).await?;
 
         let synth_prompt =
             SYNTH_IMPL_PROMPT.replace("{proposals}", &impl_proposals.join("\n\n---\n\n"));
-        let impl_result = query_claude(&synth_prompt).await?;
+        let impl_result = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &synth_prompt).await?;
 
         let output: ImplOutput = parse_json(&impl_result)?;
         apply_edits(&output.edits)?;
@@ -503,22 +552,38 @@ async fn cmd_all(idea: &str) -> Result<()> {
     Ok(())
 }
 
-async fn query_parallel(prompt: &str) -> Result<Vec<String>> {
-    let (claude, codex, gemini) = tokio::join!(
-        query_claude(prompt),
-        query_codex(prompt),
-        query_gemini(prompt),
-    );
+async fn query_parallel(config: &Config, provider_names: &[String], prompt: &str) -> Result<Vec<String>> {
+    let mut tasks = Vec::new();
+
+    for name in provider_names {
+        let name_clone = name.clone();
+        let prompt_clone = prompt.to_string();
+        let provider_config = config.get_provider(name).cloned();
+
+        let task = tokio::spawn(async move {
+            if let Some(provider_config) = provider_config {
+                query_provider(&name_clone, &provider_config, &prompt_clone).await
+            } else {
+                Err(anyhow::anyhow!("Provider {} not configured", name_clone))
+            }
+        });
+
+        tasks.push((name.clone(), task));
+    }
 
     let mut results = Vec::new();
-    if let Ok(r) = claude {
-        results.push(format!("[Claude]\n{}", r));
-    }
-    if let Ok(r) = codex {
-        results.push(format!("[Codex]\n{}", r));
-    }
-    if let Ok(r) = gemini {
-        results.push(format!("[Gemini]\n{}", r));
+    for (name, task) in tasks {
+        match task.await {
+            Ok(Ok(response)) => {
+                results.push(format!("[{}]\n{}", name, response));
+            }
+            Ok(Err(e)) => {
+                eprintln!("Provider {} failed: {}", name, e);
+            }
+            Err(e) => {
+                eprintln!("Provider {} task failed: {}", name, e);
+            }
+        }
     }
 
     if results.is_empty() {
@@ -528,63 +593,41 @@ async fn query_parallel(prompt: &str) -> Result<Vec<String>> {
     Ok(results)
 }
 
-async fn query_claude(prompt: &str) -> Result<String> {
-    let output = Command::new("claude")
-        .args(["-p", prompt])
+async fn query_provider(name: &str, provider_config: &config::ProviderConfig, prompt: &str) -> Result<String> {
+    // Replace {prompt} placeholder in args
+    let args: Vec<String> = provider_config.args.iter()
+        .map(|arg| arg.replace("{prompt}", prompt))
+        .collect();
+
+    let output = Command::new(&provider_config.command)
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
         .await
-        .context("Failed to run claude")?;
+        .context(format!("Failed to run {}", name))?;
 
     if !output.status.success() {
-        anyhow::bail!("Claude failed");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn query_codex(prompt: &str) -> Result<String> {
-    let output = Command::new("codex")
-        .args(["exec", "--json", "-s", "read-only", prompt])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .context("Failed to run codex")?;
-
-    if !output.status.success() {
-        anyhow::bail!("Codex failed");
+        anyhow::bail!("{} failed with status: {}", name, output.status);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("item.completed") {
-                if let Some(text) = v.pointer("/item/content/0/text").and_then(|t| t.as_str()) {
-                    return Ok(text.to_string());
+
+    // Special handling for codex JSON stream
+    if name == "codex" || provider_config.provider_type == "codex" {
+        for line in stdout.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("item.completed") {
+                    if let Some(text) = v.pointer("/item/content/0/text").and_then(|t| t.as_str()) {
+                        return Ok(text.to_string());
+                    }
                 }
             }
         }
+        anyhow::bail!("No output from {}", name)
+    } else {
+        Ok(stdout.trim().to_string())
     }
-
-    anyhow::bail!("No output from codex")
-}
-
-async fn query_gemini(prompt: &str) -> Result<String> {
-    let output = Command::new("npx")
-        .args(["@google/gemini-cli", prompt])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .context("Failed to run gemini")?;
-
-    if !output.status.success() {
-        anyhow::bail!("Gemini failed");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn extract_toml(text: &str) -> String {
