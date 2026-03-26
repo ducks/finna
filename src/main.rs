@@ -384,7 +384,27 @@ async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &st
         SYNTH_IMPL_PROMPT.replace("{proposals}", &impl_proposals.join("\n\n---\n\n"));
     let impl_result = query_provider(&config.default_spec_provider, config.get_provider(&config.default_spec_provider).unwrap(), &synth_prompt).await?;
 
-    let output: ImplOutput = parse_json(&impl_result)?;
+    // Try to parse JSON, but if it fails, ask Claude to convert the response to JSON
+    let output: ImplOutput = match parse_json(&impl_result) {
+        Ok(output) => output,
+        Err(_) => {
+            println!("    (non-JSON response, asking Claude to convert...)");
+            let convert_prompt = format!(
+                "Convert the following response to JSON format {{\"edits\": [], \"commands\": []}}.\n\
+                 If the response indicates no work is needed or the spec is already implemented, return empty arrays.\n\
+                 Otherwise, extract any mentioned file edits or shell commands.\n\
+                 Return ONLY valid JSON, no explanation.\n\n\
+                 Response to convert:\n{}",
+                impl_result
+            );
+            let json_result = query_provider(
+                &config.default_spec_provider,
+                config.get_provider(&config.default_spec_provider).unwrap(),
+                &convert_prompt
+            ).await?;
+            parse_json(&json_result)?
+        }
+    };
     apply_edits(&output.edits)?;
     execute_commands(&output.commands).await?;
 
