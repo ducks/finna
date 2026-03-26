@@ -152,6 +152,9 @@ enum Commands {
         /// Specific step to implement (default: all)
         #[arg(short, long)]
         step: Option<String>,
+        /// Force re-implementation of completed steps
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -209,7 +212,7 @@ async fn main() -> Result<()> {
             cmd_debate(&config, &idea).await
         }
         Some(Commands::Spec { step }) => cmd_spec(&config, step).await,
-        Some(Commands::Implement { step }) => cmd_implement(&config, step).await,
+        Some(Commands::Implement { step, force }) => cmd_implement(&config, step, force).await,
         None => {
             let idea = cli.idea.join(" ");
             if idea.is_empty() {
@@ -302,7 +305,7 @@ async fn cmd_spec(config: &Config, step_filter: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_implement(config: &Config, step_filter: Option<String>) -> Result<()> {
+async fn cmd_implement(config: &Config, step_filter: Option<String>, force: bool) -> Result<()> {
     let roadmap_path = ".finna/roadmap.arf";
     if !Path::new(roadmap_path).exists() {
         anyhow::bail!("No roadmap found. Run 'finna debate <idea>' first.");
@@ -325,26 +328,49 @@ async fn cmd_implement(config: &Config, step_filter: Option<String>) -> Result<(
     // If single step, run sequentially (original behavior)
     if steps.len() == 1 {
         let step = steps[0];
-        implement_step(config, step).await?;
+        implement_step(config, step, force).await?;
         println!("\nDone!");
         return Ok(());
     }
 
     // Multiple steps: implement in parallel respecting dependencies
-    implement_parallel(config, &steps).await?;
+    implement_parallel(config, &steps, force).await?;
 
     println!("\nDone!");
     Ok(())
 }
 
-async fn implement_step(config: &Config, step: &Step) -> Result<()> {
+async fn implement_step(config: &Config, step: &Step, force: bool) -> Result<()> {
     let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
-    implement_step_by_path(config, &step.name, &spec_path).await
+    implement_step_by_path(config, &step.name, &spec_path, force).await
 }
 
-async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &str) -> Result<()> {
+fn is_step_completed(spec_path: &str) -> bool {
+    if let Ok(contents) = fs::read_to_string(spec_path) {
+        contents.contains("outcome = \"success\"")
+    } else {
+        false
+    }
+}
+
+fn mark_step_completed(spec_path: &str) -> Result<()> {
+    let mut contents = fs::read_to_string(spec_path)?;
+    if !contents.contains("outcome =") {
+        contents.push_str("\noutcome = \"success\"\n");
+        fs::write(spec_path, contents)?;
+    }
+    Ok(())
+}
+
+async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &str, force: bool) -> Result<()> {
     if !Path::new(spec_path).exists() {
         eprintln!("  Skipping {}: no spec found", step_name);
+        return Ok(());
+    }
+
+    // Check if already completed
+    if !force && is_step_completed(spec_path) {
+        println!("  ⊙ Skipping {}: already completed (use --force to re-run)", step_name);
         return Ok(());
     }
 
@@ -362,10 +388,13 @@ async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &st
     apply_edits(&output.edits)?;
     execute_commands(&output.commands).await?;
 
+    // Mark as completed
+    mark_step_completed(spec_path)?;
+
     Ok(())
 }
 
-async fn implement_parallel(config: &Config, steps: &[&Step]) -> Result<()> {
+async fn implement_parallel(config: &Config, steps: &[&Step], force: bool) -> Result<()> {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -373,11 +402,22 @@ async fn implement_parallel(config: &Config, steps: &[&Step]) -> Result<()> {
     // Track completed steps
     let completed = Arc::new(Mutex::new(HashSet::new()));
 
+    // Pre-populate with already-completed steps (if not forcing re-run)
+    if !force {
+        for step in steps {
+            let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step.order, step.name);
+            if is_step_completed(&spec_path) {
+                completed.lock().await.insert(step.name.clone());
+            }
+        }
+    }
+
     // Build map of step name -> step for quick lookup (for future use)
     let _step_map: HashMap<String, &Step> = steps.iter().map(|s| (s.name.clone(), *s)).collect();
 
     // Clone config for use in spawned tasks
     let config = Arc::new(config.clone());
+    let force = Arc::new(force);
 
     // Keep implementing until all steps are done
     while completed.lock().await.len() < steps.len() {
@@ -414,11 +454,12 @@ async fn implement_parallel(config: &Config, steps: &[&Step]) -> Result<()> {
             let step_order = step.order;
             let completed_clone = Arc::clone(&completed);
             let config_clone = Arc::clone(&config);
+            let force_clone = Arc::clone(&force);
 
             let handle = tokio::spawn(async move {
                 // Reconstruct step from stored data
                 let spec_path = format!(".finna/specs/{:02}-{}/spec.arf", step_order, step_name);
-                let result = implement_step_by_path(&config_clone, &step_name, &spec_path).await;
+                let result = implement_step_by_path(&config_clone, &step_name, &spec_path, *force_clone).await;
                 if result.is_ok() {
                     completed_clone.lock().await.insert(step_name.clone());
                     println!("  ✓ Completed: {}", step_name);
