@@ -625,6 +625,15 @@ async fn query_provider(name: &str, provider_config: &config::ProviderConfig, pr
             }
         }
         anyhow::bail!("No output from {}", name)
+    } else if name == "claude" || provider_config.provider_type == "claude" {
+        // Special handling for Claude CLI JSON output format
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+            if let Some(result) = v.get("result").and_then(|r| r.as_str()) {
+                return Ok(result.to_string());
+            }
+        }
+        // If parsing as JSON failed or no result field, return raw output
+        Ok(stdout.trim().to_string())
     } else {
         Ok(stdout.trim().to_string())
     }
