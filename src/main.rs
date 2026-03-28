@@ -395,6 +395,33 @@ fn git_create_feature_branch(step_name: &str) -> Result<String> {
     Ok(branch_name)
 }
 
+fn git_commit_changes(step_name: &str) -> Result<()> {
+    // Check if there are any changes to commit
+    let status_output = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()?;
+
+    if status_output.stdout.is_empty() {
+        println!("    (no changes to commit)");
+        return Ok(());
+    }
+
+    // Stage all changes
+    println!("    (staging changes)");
+    std::process::Command::new("git")
+        .args(["add", "-A"])
+        .status()?;
+
+    // Commit with step name
+    let commit_msg = format!("Implement {} (finna)", step_name);
+    println!("    (committing: {})", commit_msg);
+    std::process::Command::new("git")
+        .args(["commit", "-m", &commit_msg])
+        .status()?;
+
+    Ok(())
+}
+
 fn git_merge_to_main(branch_name: &str, step_name: &str) -> Result<()> {
     // Switch back to main
     println!("    (merging {} to main)", branch_name);
@@ -470,6 +497,9 @@ async fn implement_step_by_path(config: &Config, step_name: &str, spec_path: &st
 
     // Mark as completed
     mark_step_completed(spec_path)?;
+
+    // Git workflow: commit changes
+    git_commit_changes(step_name)?;
 
     // Git workflow: merge back to main
     git_merge_to_main(&branch_name, step_name)?;
