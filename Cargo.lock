@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "finna"
-version = "20260227.0.0"
+version = "20260329.0.0"
 dependencies = [
  "anyhow",
  "clap",
